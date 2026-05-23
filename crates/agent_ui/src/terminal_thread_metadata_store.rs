@@ -232,6 +232,33 @@ impl TerminalThreadMetadataStore {
         cx.notify();
     }
 
+    pub fn try_claim_session(
+        &mut self,
+        terminal_id: TerminalId,
+        terminal_created_at: DateTime<Utc>,
+        session_id: SharedString,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(metadata) = self.terminals.get(&terminal_id).cloned() else {
+            return false;
+        };
+
+        let ambiguity_window = chrono::Duration::seconds(2);
+        let is_ambiguous = self.terminals.values().any(|other| {
+            other.terminal_id != terminal_id
+                && other.working_directory == metadata.working_directory
+                && (other.created_at - terminal_created_at).abs() < ambiguity_window
+        });
+        if is_ambiguous {
+            return false;
+        }
+
+        let mut updated = metadata;
+        updated.claude_session_id = Some(session_id);
+        self.save(updated, cx);
+        true
+    }
+
     fn save_internal(&mut self, metadata: TerminalThreadMetadata) {
         if let Some(existing) = self.terminals.get(&metadata.terminal_id) {
             if existing.folder_paths() != metadata.folder_paths()
@@ -619,6 +646,80 @@ mod tests {
             .unwrap();
 
         assert_eq!(reloaded.claude_session_id, Some(session_id));
+    }
+
+    #[gpui::test]
+    async fn test_try_claim_session_succeeds_for_single_terminal(cx: &mut TestAppContext) {
+        init_test(cx);
+        let store = cx.update(|cx| TerminalThreadMetadataStore::global(cx));
+
+        let paths = WorktreePaths::default();
+        let terminal_id = TerminalId::new();
+        let created_at = Utc::now() - chrono::Duration::seconds(5);
+        let meta = TerminalThreadMetadata {
+            terminal_id,
+            title: SharedString::from("test"),
+            custom_title: None,
+            created_at,
+            worktree_paths: paths,
+            remote_connection: None,
+            working_directory: Some(PathBuf::from("/home/user/code")),
+            claude_session_id: None,
+        };
+        cx.update(|cx| {
+            store.update(cx, |store, cx| store.save(meta, cx));
+        });
+
+        let session_id = SharedString::from("session-abc");
+        let claimed = cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.try_claim_session(terminal_id, created_at, session_id.clone(), cx)
+            })
+        });
+        assert!(claimed);
+
+        let saved_id = cx.update(|cx| {
+            store
+                .read(cx)
+                .entry(terminal_id)
+                .and_then(|m| m.claude_session_id.clone())
+        });
+        assert_eq!(saved_id, Some(session_id));
+    }
+
+    #[gpui::test]
+    async fn test_try_claim_session_rejects_ambiguous_terminals(cx: &mut TestAppContext) {
+        init_test(cx);
+        let store = cx.update(|cx| TerminalThreadMetadataStore::global(cx));
+
+        let now = Utc::now();
+        let working_dir = Some(PathBuf::from("/home/user/code"));
+        let id1 = TerminalId::new();
+        let id2 = TerminalId::new();
+
+        for (id, offset_ms) in [(id1, 0i64), (id2, 500i64)] {
+            let created_at = now + chrono::Duration::milliseconds(offset_ms);
+            let meta = TerminalThreadMetadata {
+                terminal_id: id,
+                title: SharedString::from("test"),
+                custom_title: None,
+                created_at,
+                worktree_paths: WorktreePaths::default(),
+                remote_connection: None,
+                working_directory: working_dir.clone(),
+                claude_session_id: None,
+            };
+            cx.update(|cx| {
+                store.update(cx, |store, cx| store.save(meta, cx));
+            });
+        }
+
+        let claimed = cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.try_claim_session(id1, now, SharedString::from("session-xyz"), cx)
+            })
+        });
+        assert!(!claimed);
     }
 
     #[gpui::test]
