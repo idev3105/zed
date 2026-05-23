@@ -3,6 +3,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 use gpui::{AsyncApp, Task, WeakEntity};
+use serde_json::Value;
 use ui::SharedString;
 
 use crate::{TerminalId, terminal_thread_metadata_store::TerminalThreadMetadataStore};
@@ -24,12 +25,15 @@ pub fn claude_session_dir_for(working_dir: &std::path::Path) -> Option<PathBuf> 
 
 /// The watch loop run as a GPUI foreground task.
 /// Callers construct the task with `cx.spawn(...)` and store it in `ClaudeSessionWatcher { _task }`.
+/// After a session is claimed, polls the session's `.jsonl` file for an `ai-title` entry and
+/// calls `on_ai_title` with the title string when one is found.
 pub async fn watch_loop(
     terminal_id: TerminalId,
     created_at: DateTime<Utc>,
     watch_dir: PathBuf,
     fs: Arc<dyn fs::Fs>,
     store: WeakEntity<TerminalThreadMetadataStore>,
+    on_ai_title: Box<dyn FnOnce(SharedString, &mut AsyncApp) + Send + 'static>,
     cx: &mut AsyncApp,
 ) {
     // Poll for up to 30 seconds for the directory to appear (Claude Code may not have run yet).
@@ -80,6 +84,7 @@ pub async fn watch_loop(
                 continue;
             }
 
+            let session_file = watch_dir.join(format!("{}.jsonl", session_id));
             let claimed = store
                 .update(cx, |store, cx| {
                     store.try_claim_session(terminal_id, created_at, session_id, cx)
@@ -87,9 +92,40 @@ pub async fn watch_loop(
                 .unwrap_or(false);
 
             if claimed {
+                poll_ai_title(session_file, fs, on_ai_title, cx).await;
                 return;
             }
         }
+    }
+}
+
+async fn poll_ai_title(
+    session_file: PathBuf,
+    fs: Arc<dyn fs::Fs>,
+    on_ai_title: Box<dyn FnOnce(SharedString, &mut AsyncApp) + Send + 'static>,
+    cx: &mut AsyncApp,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(300);
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        if let Ok(content) = fs.load(&session_file).await {
+            for line in content.lines() {
+                if !line.contains("\"ai-title\"") {
+                    continue;
+                }
+                if let Ok(value) = serde_json::from_str::<Value>(line) {
+                    if value["type"].as_str() == Some("ai-title") {
+                        if let Some(title) = value["aiTitle"].as_str() {
+                            on_ai_title(SharedString::from(title.to_owned()), cx);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        cx.background_executor().timer(Duration::from_secs(2)).await;
     }
 }
 
@@ -135,7 +171,16 @@ mod tests {
         let store_weak = store.downgrade();
 
         let _watcher_task = cx.spawn(async move |mut cx| {
-            watch_loop(terminal_id, created_at, watch_dir.clone(), fs, store_weak, &mut cx).await
+            watch_loop(
+                terminal_id,
+                created_at,
+                watch_dir.clone(),
+                fs,
+                store_weak,
+                Box::new(|_title, _cx| {}),
+                &mut cx,
+            )
+            .await
         });
 
         cx.run_until_parked();
@@ -187,7 +232,16 @@ mod tests {
         let store_weak = store.downgrade();
 
         let _watcher_task = cx.spawn(async move |mut cx| {
-            watch_loop(terminal_id, created_at, watch_dir, fs, store_weak, &mut cx).await
+            watch_loop(
+                terminal_id,
+                created_at,
+                watch_dir,
+                fs,
+                store_weak,
+                Box::new(|_title, _cx| {}),
+                &mut cx,
+            )
+            .await
         });
 
         cx.run_until_parked();
@@ -199,5 +253,64 @@ mod tests {
                 .and_then(|m| m.claude_session_id.clone())
         });
         assert_eq!(saved_id, None);
+    }
+
+    #[gpui::test]
+    async fn test_watcher_calls_on_ai_title(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            crate::terminal_thread_metadata_store::TerminalThreadMetadataStore::init_global(cx)
+        });
+
+        let store = cx.update(|cx| TerminalThreadMetadataStore::global(cx));
+        let terminal_id = TerminalId::new();
+        let meta = make_metadata(terminal_id, "/home/user/aiproj");
+        let created_at = meta.created_at;
+        cx.update(|cx| store.update(cx, |s, cx| s.save(meta, cx)));
+
+        let fake_fs = FakeFs::new(cx.background_executor().clone());
+        let watch_dir = PathBuf::from("/fake-home/.claude/projects/-home-user-aiproj");
+        fake_fs.create_dir(&watch_dir).await.unwrap();
+
+        let fs: Arc<dyn fs::Fs> = Arc::new(fake_fs.clone());
+        let store_weak = store.downgrade();
+
+        let received_title: std::sync::Arc<std::sync::Mutex<Option<SharedString>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let received_title_clone = received_title.clone();
+        let on_ai_title = Box::new(move |title: SharedString, _cx: &mut AsyncApp| {
+            *received_title_clone.lock().unwrap() = Some(title);
+        });
+
+        let _watcher_task = cx.spawn(async move |mut cx| {
+            watch_loop(
+                terminal_id,
+                created_at,
+                watch_dir.clone(),
+                fs,
+                store_weak,
+                on_ai_title,
+                &mut cx,
+            )
+            .await
+        });
+
+        cx.run_until_parked();
+
+        // Write the session file with an ai-title entry
+        fake_fs
+            .insert_file(
+                "/fake-home/.claude/projects/-home-user-aiproj/sess-abc.jsonl",
+                concat!(
+                    "{\"type\":\"user\",\"sessionId\":\"sess-abc\"}\n",
+                    "{\"type\":\"ai-title\",\"aiTitle\":\"Fix login bug\",\"sessionId\":\"sess-abc\"}\n"
+                )
+                .into(),
+            )
+            .await;
+
+        cx.run_until_parked();
+
+        let title = received_title.lock().unwrap().clone();
+        assert_eq!(title, Some(SharedString::from("Fix login bug")));
     }
 }

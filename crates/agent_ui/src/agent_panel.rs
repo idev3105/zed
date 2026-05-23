@@ -63,8 +63,8 @@ use extension_host::ExtensionStore;
 
 use fs::Fs;
 use gpui::{
-    Action, Anchor, Animation, AnimationExt, AnyElement, App, AsyncWindowContext, ClipboardItem,
-    Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, KeyContext, Pixels,
+    Action, Anchor, Animation, AnimationExt, AnyElement, App, AsyncApp, AsyncWindowContext,
+    ClipboardItem, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, KeyContext, Pixels,
     PlatformDisplay, Subscription, Task, TaskExt, WeakEntity, WindowHandle, prelude::*,
     pulsating_between,
 };
@@ -1877,8 +1877,26 @@ impl AgentPanel {
                         .map(|s| s.downgrade())
                     {
                         let created_at = terminal.created_at;
+                        let panel_weak = cx.weak_entity();
                         let task = cx.spawn(async move |_this, cx| {
-                            watch_loop(terminal_id, created_at, watch_dir, fs, store, cx).await
+                            let on_ai_title =
+                                Box::new(move |title: SharedString, cx: &mut AsyncApp| {
+                                    panel_weak
+                                        .update(cx, |panel, cx| {
+                                            panel.apply_ai_title(terminal_id, title, cx);
+                                        })
+                                        .ok();
+                                });
+                            watch_loop(
+                                terminal_id,
+                                created_at,
+                                watch_dir,
+                                fs,
+                                store,
+                                on_ai_title,
+                                cx,
+                            )
+                            .await
                         });
                         terminal._claude_session_watcher =
                             Some(ClaudeSessionWatcher { _task: task });
@@ -2019,6 +2037,18 @@ impl AgentPanel {
         for terminal_id in terminal_ids {
             self.persist_terminal_metadata(terminal_id, cx);
         }
+    }
+
+    fn apply_ai_title(&mut self, terminal_id: TerminalId, title: SharedString, cx: &mut Context<Self>) {
+        let Some(terminal) = self.terminals.get(&terminal_id) else {
+            return;
+        };
+        let view = terminal.view.clone();
+        view.update(cx, |view, cx| {
+            view.set_custom_title(Some(title.to_string()), cx);
+        });
+        self.persist_terminal_metadata(terminal_id, cx);
+        cx.notify();
     }
 
     fn persist_terminal_metadata(&self, terminal_id: TerminalId, cx: &mut Context<Self>) {
