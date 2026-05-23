@@ -53,6 +53,7 @@ pub struct TerminalThreadMetadata {
     pub worktree_paths: WorktreePaths,
     pub remote_connection: Option<RemoteConnectionOptions>,
     pub working_directory: Option<PathBuf>,
+    pub claude_session_id: Option<SharedString>,
 }
 
 impl TerminalThreadMetadata {
@@ -231,6 +232,33 @@ impl TerminalThreadMetadataStore {
         cx.notify();
     }
 
+    pub fn try_claim_session(
+        &mut self,
+        terminal_id: TerminalId,
+        terminal_created_at: DateTime<Utc>,
+        session_id: SharedString,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(metadata) = self.terminals.get(&terminal_id).cloned() else {
+            return false;
+        };
+
+        let ambiguity_window = chrono::Duration::seconds(2);
+        let is_ambiguous = self.terminals.values().any(|other| {
+            other.terminal_id != terminal_id
+                && other.working_directory == metadata.working_directory
+                && (other.created_at - terminal_created_at).abs() < ambiguity_window
+        });
+        if is_ambiguous {
+            return false;
+        }
+
+        let mut updated = metadata;
+        updated.claude_session_id = Some(session_id);
+        self.save(updated, cx);
+        true
+    }
+
     fn save_internal(&mut self, metadata: TerminalThreadMetadata) {
         if let Some(existing) = self.terminals.get(&metadata.terminal_id) {
             if existing.folder_paths() != metadata.folder_paths()
@@ -375,20 +403,26 @@ struct TerminalThreadMetadataDb(ThreadSafeConnection);
 impl Domain for TerminalThreadMetadataDb {
     const NAME: &str = stringify!(TerminalThreadMetadataDb);
 
-    const MIGRATIONS: &[&str] = &[sql!(
-        CREATE TABLE IF NOT EXISTS sidebar_terminal_threads(
-            terminal_id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            custom_title TEXT,
-            created_at TEXT NOT NULL,
-            working_directory TEXT,
-            folder_paths TEXT,
-            folder_paths_order TEXT,
-            main_worktree_paths TEXT,
-            main_worktree_paths_order TEXT,
-            remote_connection TEXT
-        ) STRICT;
-    )];
+    const MIGRATIONS: &[&str] = &[
+        sql!(
+            CREATE TABLE IF NOT EXISTS sidebar_terminal_threads(
+                terminal_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                custom_title TEXT,
+                created_at TEXT NOT NULL,
+                working_directory TEXT,
+                folder_paths TEXT,
+                folder_paths_order TEXT,
+                main_worktree_paths TEXT,
+                main_worktree_paths_order TEXT,
+                remote_connection TEXT
+            ) STRICT;
+        ),
+        sql!(
+            ALTER TABLE sidebar_terminal_threads
+            ADD COLUMN claude_session_id TEXT;
+        ),
+    ];
 }
 
 db::static_connection!(TerminalThreadMetadataDb, []);
@@ -398,7 +432,7 @@ impl TerminalThreadMetadataDb {
         self.select::<TerminalThreadMetadata>(
             "SELECT terminal_id, title, custom_title, created_at, \
             working_directory, folder_paths, folder_paths_order, main_worktree_paths, \
-            main_worktree_paths_order, remote_connection \
+            main_worktree_paths_order, remote_connection, claude_session_id \
             FROM sidebar_terminal_threads \
             ORDER BY created_at DESC",
         )?()
@@ -432,10 +466,11 @@ impl TerminalThreadMetadataDb {
             .map(serde_json::to_string)
             .transpose()
             .context("serialize terminal thread remote connection")?;
+        let claude_session_id = row.claude_session_id.as_ref().map(ToString::to_string);
 
         self.write(move |conn| {
-            let sql = "INSERT INTO sidebar_terminal_threads(terminal_id, title, custom_title, created_at, working_directory, folder_paths, folder_paths_order, main_worktree_paths, main_worktree_paths_order, remote_connection) \
-                       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+            let sql = "INSERT INTO sidebar_terminal_threads(terminal_id, title, custom_title, created_at, working_directory, folder_paths, folder_paths_order, main_worktree_paths, main_worktree_paths_order, remote_connection, claude_session_id) \
+                       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
                        ON CONFLICT(terminal_id) DO UPDATE SET \
                            title = excluded.title, \
                            custom_title = excluded.custom_title, \
@@ -445,7 +480,8 @@ impl TerminalThreadMetadataDb {
                            folder_paths_order = excluded.folder_paths_order, \
                            main_worktree_paths = excluded.main_worktree_paths, \
                            main_worktree_paths_order = excluded.main_worktree_paths_order, \
-                           remote_connection = excluded.remote_connection";
+                           remote_connection = excluded.remote_connection, \
+                           claude_session_id = excluded.claude_session_id";
             let mut stmt = Statement::prepare(conn, sql)?;
             let mut i = stmt.bind(&terminal_id, 1)?;
             i = stmt.bind(&title, i)?;
@@ -456,7 +492,8 @@ impl TerminalThreadMetadataDb {
             i = stmt.bind(&folder_paths_order, i)?;
             i = stmt.bind(&main_worktree_paths, i)?;
             i = stmt.bind(&main_worktree_paths_order, i)?;
-            stmt.bind(&remote_connection, i)?;
+            i = stmt.bind(&remote_connection, i)?;
+            stmt.bind(&claude_session_id, i)?;
             stmt.exec()
         })
         .await
@@ -491,6 +528,8 @@ impl Column for TerminalThreadMetadata {
         let (main_worktree_paths_order_str, next): (Option<String>, i32) =
             Column::column(statement, next)?;
         let (remote_connection_json, next): (Option<String>, i32) =
+            Column::column(statement, next)?;
+        let (claude_session_id_str, next): (Option<String>, i32) =
             Column::column(statement, next)?;
 
         let folder_paths = folder_paths_str
@@ -531,6 +570,9 @@ impl Column for TerminalThreadMetadata {
                 worktree_paths,
                 remote_connection,
                 working_directory: working_directory.map(PathBuf::from),
+                claude_session_id: claude_session_id_str
+                    .filter(|s| !s.trim().is_empty())
+                    .map(SharedString::from),
             },
             next,
         ))
@@ -560,7 +602,124 @@ mod tests {
             worktree_paths,
             remote_connection: None,
             working_directory: None,
+            claude_session_id: None,
         }
+    }
+
+    #[gpui::test]
+    async fn test_claude_session_id_round_trips_through_db(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let store = cx.update(|cx| TerminalThreadMetadataStore::global(cx));
+        let terminal_id = TerminalId::new();
+        let session_id = SharedString::from("abc-def-1234");
+        let paths = WorktreePaths::from_path_lists(
+            PathList::new(&[Path::new("/home/user/code")]),
+            PathList::new(&[Path::new("/home/user/code")]),
+        )
+        .unwrap();
+        let original = TerminalThreadMetadata {
+            terminal_id,
+            title: SharedString::from("test"),
+            custom_title: None,
+            created_at: Utc::now(),
+            worktree_paths: paths,
+            remote_connection: None,
+            working_directory: Some(PathBuf::from("/home/user/code")),
+            claude_session_id: Some(session_id.clone()),
+        };
+
+        cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.save(original.clone(), cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let reloaded = cx
+            .update(|cx| {
+                store
+                    .read(cx)
+                    .entry(terminal_id)
+                    .cloned()
+            })
+            .unwrap();
+
+        assert_eq!(reloaded.claude_session_id, Some(session_id));
+    }
+
+    #[gpui::test]
+    async fn test_try_claim_session_succeeds_for_single_terminal(cx: &mut TestAppContext) {
+        init_test(cx);
+        let store = cx.update(|cx| TerminalThreadMetadataStore::global(cx));
+
+        let paths = WorktreePaths::default();
+        let terminal_id = TerminalId::new();
+        let created_at = Utc::now() - chrono::Duration::seconds(5);
+        let meta = TerminalThreadMetadata {
+            terminal_id,
+            title: SharedString::from("test"),
+            custom_title: None,
+            created_at,
+            worktree_paths: paths,
+            remote_connection: None,
+            working_directory: Some(PathBuf::from("/home/user/code")),
+            claude_session_id: None,
+        };
+        cx.update(|cx| {
+            store.update(cx, |store, cx| store.save(meta, cx));
+        });
+
+        let session_id = SharedString::from("session-abc");
+        let claimed = cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.try_claim_session(terminal_id, created_at, session_id.clone(), cx)
+            })
+        });
+        assert!(claimed);
+
+        let saved_id = cx.update(|cx| {
+            store
+                .read(cx)
+                .entry(terminal_id)
+                .and_then(|m| m.claude_session_id.clone())
+        });
+        assert_eq!(saved_id, Some(session_id));
+    }
+
+    #[gpui::test]
+    async fn test_try_claim_session_rejects_ambiguous_terminals(cx: &mut TestAppContext) {
+        init_test(cx);
+        let store = cx.update(|cx| TerminalThreadMetadataStore::global(cx));
+
+        let now = Utc::now();
+        let working_dir = Some(PathBuf::from("/home/user/code"));
+        let id1 = TerminalId::new();
+        let id2 = TerminalId::new();
+
+        for (id, offset_ms) in [(id1, 0i64), (id2, 500i64)] {
+            let created_at = now + chrono::Duration::milliseconds(offset_ms);
+            let meta = TerminalThreadMetadata {
+                terminal_id: id,
+                title: SharedString::from("test"),
+                custom_title: None,
+                created_at,
+                worktree_paths: WorktreePaths::default(),
+                remote_connection: None,
+                working_directory: working_dir.clone(),
+                claude_session_id: None,
+            };
+            cx.update(|cx| {
+                store.update(cx, |store, cx| store.save(meta, cx));
+            });
+        }
+
+        let claimed = cx.update(|cx| {
+            store.update(cx, |store, cx| {
+                store.try_claim_session(id1, now, SharedString::from("session-xyz"), cx)
+            })
+        });
+        assert!(!claimed);
     }
 
     #[gpui::test]

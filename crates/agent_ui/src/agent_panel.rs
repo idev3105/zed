@@ -762,6 +762,7 @@ struct AgentTerminal {
     notification_windows: Vec<WindowHandle<AgentNotification>>,
     notification_subscriptions: Vec<Subscription>,
     _subscriptions: Vec<Subscription>,
+    _claude_session_watcher: Option<crate::claude_session_watcher::ClaudeSessionWatcher>,
 }
 
 impl AgentTerminal {
@@ -1681,6 +1682,7 @@ impl AgentPanel {
             true,
             true,
             source,
+            None,
             window,
             cx,
         );
@@ -1734,6 +1736,7 @@ impl AgentPanel {
         select: bool,
         focus: bool,
         source: AgentThreadSource,
+        claude_session_id: Option<SharedString>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1777,6 +1780,7 @@ impl AgentPanel {
                     select,
                     focus,
                     source,
+                    claude_session_id,
                     window,
                     cx,
                 );
@@ -1797,6 +1801,7 @@ impl AgentPanel {
         select: bool,
         focus: bool,
         source: AgentThreadSource,
+        claude_session_id: Option<SharedString>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1838,7 +1843,7 @@ impl AgentPanel {
         );
 
         let mut terminal = AgentTerminal {
-            view: terminal_view,
+            view: terminal_view.clone(),
             title_editor: None,
             title_editor_initial_title: None,
             title_editor_subscription: None,
@@ -1851,12 +1856,48 @@ impl AgentPanel {
             notification_windows: Vec::new(),
             notification_subscriptions: Vec::new(),
             _subscriptions: vec![view_subscription, terminal_subscription],
+            _claude_session_watcher: None,
         };
         if self.pending_terminal_spawn == Some(terminal_id) {
             self.pending_terminal_spawn = None;
         }
         terminal.refresh_metadata(cx);
+
+        #[cfg(not(test))]
+        {
+            if !self.project.read(cx).is_remote()
+                && let Some(working_dir) = &terminal.working_directory
+            {
+                use crate::claude_session_watcher::{
+                    ClaudeSessionWatcher, claude_session_dir_for, watch_loop,
+                };
+                if let Some(watch_dir) = claude_session_dir_for(working_dir) {
+                    let fs = self.project.read(cx).fs().clone();
+                    if let Some(store) = TerminalThreadMetadataStore::try_global(cx)
+                        .map(|s| s.downgrade())
+                    {
+                        let created_at = terminal.created_at;
+                        let task = cx.spawn(async move |_this, cx| {
+                            watch_loop(terminal_id, created_at, watch_dir, fs, store, cx).await
+                        });
+                        terminal._claude_session_watcher =
+                            Some(ClaudeSessionWatcher { _task: task });
+                    }
+                }
+            }
+        }
+
         self.terminals.insert(terminal_id, terminal);
+
+        if let Some(session_id) = claude_session_id {
+            let terminal_entity = terminal_view.read(cx).terminal().clone();
+            terminal_entity.update(cx, |terminal, _cx| {
+                terminal.input(std::borrow::Cow::Owned(
+                    format!("claude --resume {session_id}\n").into_bytes(),
+                ));
+            });
+        }
+
         self.persist_terminal_metadata(terminal_id, cx);
         self.emit_terminal_thread_started(source, cx);
         if select {
@@ -2007,6 +2048,7 @@ impl AgentPanel {
             worktree_paths: project.worktree_paths(cx),
             remote_connection: project.remote_connection_options(cx),
             working_directory: terminal.working_directory.clone(),
+            claude_session_id: None,
         })
     }
 
@@ -2040,6 +2082,7 @@ impl AgentPanel {
             true,
             focus,
             source,
+            metadata.claude_session_id.clone(),
             window,
             cx,
         );
@@ -4421,6 +4464,7 @@ impl AgentPanel {
             true,
             false,
             source,
+            None,
             window,
             cx,
         );
@@ -4444,6 +4488,7 @@ impl AgentPanel {
             true,
             false,
             source,
+            None,
             window,
             cx,
         ) {
@@ -5994,6 +6039,7 @@ impl AgentPanel {
             focus,
             focus,
             AgentThreadSource::AgentPanel,
+            None,
             window,
             cx,
         )?;
@@ -6030,6 +6076,7 @@ impl AgentPanel {
             true,
             focus,
             source,
+            metadata.claude_session_id.clone(),
             window,
             cx,
         )
@@ -6046,6 +6093,7 @@ impl AgentPanel {
         select: bool,
         focus: bool,
         source: AgentThreadSource,
+        claude_session_id: Option<SharedString>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
@@ -6080,6 +6128,7 @@ impl AgentPanel {
             select,
             focus,
             source,
+            claude_session_id,
             window,
             cx,
         );
@@ -6594,6 +6643,7 @@ mod tests {
             )])),
             remote_connection: None,
             working_directory: None,
+            claude_session_id: None,
         };
         panel
             .update_in(&mut cx, |panel, window, cx| {
@@ -8513,6 +8563,7 @@ mod tests {
             )])),
             remote_connection: None,
             working_directory: None,
+            claude_session_id: None,
         };
 
         panel.update_in(&mut cx, |panel, window, cx| {
@@ -8564,6 +8615,7 @@ mod tests {
             )])),
             remote_connection: None,
             working_directory: None,
+            claude_session_id: None,
         };
 
         panel.update_in(&mut cx, |panel, window, cx| {
