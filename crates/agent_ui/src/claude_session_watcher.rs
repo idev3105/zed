@@ -30,7 +30,7 @@ pub async fn watch_loop(
     watch_dir: PathBuf,
     fs: Arc<dyn fs::Fs>,
     store: WeakEntity<TerminalThreadMetadataStore>,
-    mut cx: AsyncApp,
+    cx: &mut AsyncApp,
 ) {
     // Poll for up to 30 seconds for the directory to appear (Claude Code may not have run yet).
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
@@ -81,7 +81,7 @@ pub async fn watch_loop(
             }
 
             let claimed = store
-                .update(&mut cx, |store, cx| {
+                .update(cx, |store, cx| {
                     store.try_claim_session(terminal_id, created_at, session_id, cx)
                 })
                 .unwrap_or(false);
@@ -134,8 +134,8 @@ mod tests {
         let fs: Arc<dyn fs::Fs> = Arc::new(fake_fs.clone());
         let store_weak = store.downgrade();
 
-        let _watcher_task = cx.spawn(async move |cx| {
-            watch_loop(terminal_id, created_at, watch_dir.clone(), fs, store_weak, cx).await
+        let _watcher_task = cx.spawn(async move |mut cx| {
+            watch_loop(terminal_id, created_at, watch_dir.clone(), fs, store_weak, &mut cx).await
         });
 
         cx.run_until_parked();
@@ -186,8 +186,8 @@ mod tests {
         let fs: Arc<dyn fs::Fs> = Arc::new(fake_fs.clone());
         let store_weak = store.downgrade();
 
-        let _watcher_task = cx.spawn(async move |cx| {
-            watch_loop(terminal_id, created_at, watch_dir, fs, store_weak, cx).await
+        let _watcher_task = cx.spawn(async move |mut cx| {
+            watch_loop(terminal_id, created_at, watch_dir, fs, store_weak, &mut cx).await
         });
 
         cx.run_until_parked();
