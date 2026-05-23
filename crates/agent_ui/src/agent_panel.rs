@@ -2040,6 +2040,13 @@ impl AgentPanel {
     ) -> Option<TerminalThreadMetadata> {
         let terminal = self.terminals.get(&terminal_id)?;
         let project = self.project.read(cx);
+        let claude_session_id = TerminalThreadMetadataStore::try_global(cx)
+            .and_then(|store| {
+                store
+                    .read(cx)
+                    .entry(terminal_id)
+                    .and_then(|m| m.claude_session_id.clone())
+            });
         Some(TerminalThreadMetadata {
             terminal_id,
             title: terminal.title(cx),
@@ -2048,7 +2055,7 @@ impl AgentPanel {
             worktree_paths: project.worktree_paths(cx),
             remote_connection: project.remote_connection_options(cx),
             working_directory: terminal.working_directory.clone(),
-            claude_session_id: None,
+            claude_session_id,
         })
     }
 
