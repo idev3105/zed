@@ -2007,6 +2007,7 @@ impl AgentPanel {
             worktree_paths: project.worktree_paths(cx),
             remote_connection: project.remote_connection_options(cx),
             working_directory: terminal.working_directory.clone(),
+            claude_session_id: None,
         })
     }
 
@@ -6594,6 +6595,7 @@ mod tests {
             )])),
             remote_connection: None,
             working_directory: None,
+            claude_session_id: None,
         };
         panel
             .update_in(&mut cx, |panel, window, cx| {
@@ -8513,6 +8515,7 @@ mod tests {
             )])),
             remote_connection: None,
             working_directory: None,
+            claude_session_id: None,
         };
 
         panel.update_in(&mut cx, |panel, window, cx| {
@@ -8564,6 +8567,7 @@ mod tests {
             )])),
             remote_connection: None,
             working_directory: None,
+            claude_session_id: None,
         };
 
         panel.update_in(&mut cx, |panel, window, cx| {
