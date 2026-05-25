@@ -4464,7 +4464,6 @@ impl Sidebar {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn hide_terminal_view(
         &mut self,
         metadata: &TerminalThreadMetadata,
