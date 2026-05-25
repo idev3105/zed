@@ -664,6 +664,7 @@ pub struct Sidebar {
     recent_projects_popover_handle: PopoverMenuHandle<SidebarRecentProjects>,
     project_header_menu_handles: HashMap<usize, PopoverMenuHandle<ContextMenu>>,
     project_header_menu_ix: Option<usize>,
+    terminal_context_menu_handles: HashMap<usize, PopoverMenuHandle<ContextMenu>>,
     _subscriptions: Vec<gpui::Subscription>,
     _draft_editor_observations: Vec<gpui::Subscription>,
     /// For the thread import banners, if there is just one we show "Import
@@ -773,6 +774,7 @@ impl Sidebar {
             recent_projects_popover_handle: PopoverMenuHandle::default(),
             project_header_menu_handles: HashMap::new(),
             project_header_menu_ix: None,
+            terminal_context_menu_handles: HashMap::default(),
             _subscriptions: Vec::new(),
             _draft_editor_observations: Vec::new(),
             import_banners_use_verbose_labels: None,
@@ -1965,6 +1967,7 @@ impl Sidebar {
             }
             ListEntry::Thread(thread) => self.render_thread(ix, thread, is_active, is_selected, cx),
             ListEntry::Terminal(terminal) => {
+                self.terminal_context_menu_handles.entry(ix).or_default();
                 self.render_terminal(ix, terminal, is_active, is_selected, cx)
             }
         };
@@ -5739,94 +5742,156 @@ impl Sidebar {
         let has_claude_session = terminal.metadata.claude_session_id.is_some();
         let focus_handle = self.focus_handle.clone();
 
-        ThreadItem::new(id, terminal.metadata.title.clone())
-            .base_bg(sidebar_bg)
-            .icon(IconName::Terminal)
-            .is_remote(is_remote)
-            .worktrees(worktrees)
-            .timestamp(timestamp)
-            .notified(terminal.has_notification)
-            .highlight_positions(terminal.highlight_positions.clone())
-            .selected(is_active)
-            .focused(is_focused)
-            .hovered(is_hovered)
-            .on_hover(cx.listener(move |this, is_hovered: &bool, _window, cx| {
-                if *is_hovered {
-                    this.hovered_thread_index = Some(ix);
-                } else if this.hovered_thread_index == Some(ix) {
-                    this.hovered_thread_index = None;
-                }
-                cx.notify();
-            }))
-            .when(is_hovered, |this| {
-                this.action_slot(
-                    h_flex()
-                        .gap_0p5()
-                        .when(has_claude_session, |this| {
-                            let metadata = metadata.clone();
-                            let workspace = workspace.clone();
-                            this.child(
-                                IconButton::new("resume-claude-session", IconName::PlayFilled)
-                                    .icon_size(IconSize::Small)
-                                    .icon_color(Color::Muted)
-                                    .tooltip(Tooltip::text("Resume Claude session"))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.resume_terminal_entry(
-                                            metadata.clone(),
-                                            workspace.clone(),
-                                            window,
-                                            cx,
-                                        );
-                                    })),
-                            )
-                        })
-                        .child({
-                            let metadata = metadata.clone();
-                            let workspace = workspace.clone();
-                            IconButton::new("close-terminal", IconName::Close)
-                                .icon_size(IconSize::Small)
-                                .icon_color(Color::Muted)
-                                .tooltip(Tooltip::text("Close Terminal"))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.hide_terminal_view(&metadata, &workspace, window, cx);
-                                }))
-                        })
-                        .child({
-                            let metadata = metadata.clone();
-                            let workspace = workspace.clone();
-                            IconButton::new("delete-terminal", IconName::Trash)
-                                .icon_size(IconSize::Small)
-                                .icon_color(Color::Muted)
-                                .tooltip({
-                                    let focus_handle = focus_handle.clone();
-                                    move |_window, cx| {
-                                        Tooltip::for_action_in(
-                                            "Delete Terminal Thread",
-                                            &ArchiveSelectedThread,
-                                            &focus_handle,
-                                            cx,
+        let context_menu_handle = self
+            .terminal_context_menu_handles
+            .get(&ix)
+            .cloned()
+            .unwrap_or_default();
+        let sidebar_weak = cx.weak_entity();
+        let metadata_for_menu = metadata.clone();
+        let workspace_for_menu = workspace.clone();
+
+        div()
+            .w_full()
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                {
+                    let context_menu_handle = context_menu_handle.clone();
+                    move |_, window, cx| {
+                        cx.stop_propagation();
+                        context_menu_handle.toggle(window, cx);
+                    }
+                },
+            )
+            .child(
+                PopoverMenu::new(format!(
+                    "terminal-context-menu-{}",
+                    terminal.metadata.terminal_id
+                ))
+                .with_handle(context_menu_handle)
+                .anchor(gpui::Anchor::TopLeft)
+                .menu(move |window, cx| {
+                    let metadata = metadata_for_menu.clone();
+                    let workspace = workspace_for_menu.clone();
+                    let sidebar_weak = sidebar_weak.clone();
+                    ContextMenu::build(window, cx, move |menu, _window, _cx| {
+                        menu.entry(
+                            "Delete Terminal Thread",
+                            None,
+                            {
+                                let metadata = metadata.clone();
+                                let workspace = workspace.clone();
+                                let sidebar_weak = sidebar_weak.clone();
+                                move |window, cx| {
+                                    sidebar_weak
+                                        .update(cx, |sidebar, cx| {
+                                            sidebar.delete_terminal(
+                                                &metadata, &workspace, window, cx,
+                                            );
+                                        })
+                                        .ok();
+                                }
+                            },
+                        )
+                    })
+                    .into()
+                }),
+            )
+            .child(
+                ThreadItem::new(id, terminal.metadata.title.clone())
+                    .base_bg(sidebar_bg)
+                    .icon(IconName::Terminal)
+                    .is_remote(is_remote)
+                    .worktrees(worktrees)
+                    .timestamp(timestamp)
+                    .notified(terminal.has_notification)
+                    .highlight_positions(terminal.highlight_positions.clone())
+                    .selected(is_active)
+                    .focused(is_focused)
+                    .hovered(is_hovered)
+                    .on_hover(cx.listener(move |this, is_hovered: &bool, _window, cx| {
+                        if *is_hovered {
+                            this.hovered_thread_index = Some(ix);
+                        } else if this.hovered_thread_index == Some(ix) {
+                            this.hovered_thread_index = None;
+                        }
+                        cx.notify();
+                    }))
+                    .when(is_hovered, |this| {
+                        this.action_slot(
+                            h_flex()
+                                .gap_0p5()
+                                .when(has_claude_session, |this| {
+                                    let metadata = metadata.clone();
+                                    let workspace = workspace.clone();
+                                    this.child(
+                                        IconButton::new(
+                                            "resume-claude-session",
+                                            IconName::PlayFilled,
                                         )
-                                    }
+                                        .icon_size(IconSize::Small)
+                                        .icon_color(Color::Muted)
+                                        .tooltip(Tooltip::text("Resume Claude session"))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.resume_terminal_entry(
+                                                metadata.clone(),
+                                                workspace.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        })),
+                                    )
                                 })
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.delete_terminal(&metadata, &workspace, window, cx);
-                                }))
-                        }),
-                )
-            })
-            .on_click(cx.listener({
-                let metadata = terminal.metadata.clone();
-                let workspace = terminal.workspace.clone();
-                move |this, _, window, cx| {
-                    this.activate_terminal_entry(
-                        metadata.clone(),
-                        workspace.clone(),
-                        false,
-                        window,
-                        cx,
-                    );
-                }
-            }))
+                                .child({
+                                    let metadata = metadata.clone();
+                                    let workspace = workspace.clone();
+                                    IconButton::new("close-terminal", IconName::Close)
+                                        .icon_size(IconSize::Small)
+                                        .icon_color(Color::Muted)
+                                        .tooltip(Tooltip::text("Close Terminal"))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.hide_terminal_view(
+                                                &metadata, &workspace, window, cx,
+                                            );
+                                        }))
+                                })
+                                .child({
+                                    let metadata = metadata.clone();
+                                    let workspace = workspace.clone();
+                                    IconButton::new("delete-terminal", IconName::Trash)
+                                        .icon_size(IconSize::Small)
+                                        .icon_color(Color::Muted)
+                                        .tooltip({
+                                            let focus_handle = focus_handle.clone();
+                                            move |_window, cx| {
+                                                Tooltip::for_action_in(
+                                                    "Delete Terminal Thread",
+                                                    &ArchiveSelectedThread,
+                                                    &focus_handle,
+                                                    cx,
+                                                )
+                                            }
+                                        })
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.delete_terminal(&metadata, &workspace, window, cx);
+                                        }))
+                                }),
+                        )
+                    })
+                    .on_click(cx.listener({
+                        let metadata = terminal.metadata.clone();
+                        let workspace = terminal.workspace.clone();
+                        move |this, _, window, cx| {
+                            this.activate_terminal_entry(
+                                metadata.clone(),
+                                workspace.clone(),
+                                false,
+                                window,
+                                cx,
+                            );
+                        }
+                    })),
+            )
             .into_any_element()
     }
 
