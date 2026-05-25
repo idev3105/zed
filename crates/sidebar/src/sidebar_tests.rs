@@ -1663,6 +1663,76 @@ async fn test_closing_last_agent_panel_terminal_restores_empty_header(cx: &mut T
 }
 
 #[gpui::test]
+async fn test_close_terminal_view_keeps_thread_in_sidebar(cx: &mut TestAppContext) {
+    let project = init_test_project_with_agent_panel("/my-project", cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let (sidebar, panel) = setup_sidebar_with_agent_panel(&multi_workspace, cx);
+
+    let terminal_id = panel
+        .update_in(cx, |panel, window, cx| {
+            panel.insert_test_terminal("Dev Server", true, window, cx)
+        })
+        .expect("test terminal should be inserted");
+    cx.run_until_parked();
+
+    assert_eq!(
+        visible_entries_as_strings(&sidebar, cx),
+        vec!["v [my-project]", "  Dev Server"]
+    );
+
+    let (terminal_metadata, terminal_workspace) = sidebar.read_with(cx, |sidebar, _cx| {
+        sidebar
+            .contents
+            .entries
+            .iter()
+            .find_map(|entry| match entry {
+                ListEntry::Terminal(terminal)
+                    if terminal.metadata.terminal_id == terminal_id =>
+                {
+                    Some((terminal.metadata.clone(), terminal.workspace.clone()))
+                }
+                _ => None,
+            })
+            .expect("terminal should be visible in sidebar")
+    });
+
+    // Close the terminal view — should keep thread in sidebar
+    sidebar.update_in(cx, |sidebar, window, cx| {
+        sidebar.hide_terminal_view(&terminal_metadata, &terminal_workspace, window, cx);
+    });
+    cx.run_until_parked();
+
+    // Panel should no longer have an active terminal
+    panel.read_with(cx, |panel, cx| {
+        assert!(
+            !panel.has_terminal(terminal_id),
+            "terminal view should be closed"
+        );
+        assert!(
+            panel.active_view_is_new_draft(cx),
+            "panel should show draft after hiding the active terminal"
+        );
+    });
+
+    // Thread entry must REMAIN in the sidebar list
+    assert_eq!(
+        visible_entries_as_strings(&sidebar, cx),
+        vec!["v [my-project]", "  Dev Server"],
+        "thread should remain in sidebar after close"
+    );
+
+    // Metadata must REMAIN in the store
+    sidebar.read_with(cx, |_sidebar, cx| {
+        let store = TerminalThreadMetadataStore::global(cx).read(cx);
+        assert!(
+            store.entry(terminal_id).is_some(),
+            "terminal metadata should not be deleted after hide"
+        );
+    });
+}
+
+#[gpui::test]
 async fn test_agent_panel_terminal_metadata_remains_visible_after_panel_is_removed(
     cx: &mut TestAppContext,
 ) {
