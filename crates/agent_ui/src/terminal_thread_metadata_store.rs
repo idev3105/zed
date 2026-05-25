@@ -243,6 +243,18 @@ impl TerminalThreadMetadataStore {
             return false;
         };
 
+        // If another terminal already claimed this session, don't claim it again.
+        // Without this check, all watchers monitoring the same project directory would
+        // each claim the same session file and receive the same ai-title, renaming all
+        // threads to the same value.
+        let already_claimed = self.terminals.values().any(|other| {
+            other.terminal_id != terminal_id
+                && other.claude_session_id.as_deref() == Some(session_id.as_ref())
+        });
+        if already_claimed {
+            return false;
+        }
+
         let ambiguity_window = chrono::Duration::seconds(2);
         let is_ambiguous = self.terminals.values().any(|other| {
             other.terminal_id != terminal_id

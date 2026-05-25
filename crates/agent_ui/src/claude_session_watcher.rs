@@ -14,12 +14,12 @@ pub struct ClaudeSessionWatcher {
 }
 
 /// Returns the path Claude Code uses to store sessions for the given working directory.
-/// Claude Code names the project directory by replacing '/' in the absolute path with '-'.
-/// Example: /Users/john/code -> -Users-john-code
+/// Claude Code encodes the project path by replacing path separators with '-'.
+/// On Unix: /Users/john/code -> -Users-john-code
+/// On Windows: C:\Users\john\code -> C:-Users-john-code
 pub fn claude_session_dir_for(working_dir: &std::path::Path) -> Option<PathBuf> {
-    #[allow(deprecated)]
-    let home = std::env::home_dir()?;
-    let encoded = working_dir.to_str()?.replace('/', "-");
+    let home = paths::home_dir();
+    let encoded = working_dir.to_str()?.replace(['/', '\\'], "-");
     Some(home.join(".claude").join("projects").join(encoded))
 }
 
@@ -36,6 +36,12 @@ pub async fn watch_loop(
     on_ai_title: Box<dyn FnOnce(SharedString, &mut AsyncApp) + Send + 'static>,
     cx: &mut AsyncApp,
 ) {
+    log::debug!(
+        "claude_session_watcher [{:?}]: start, watch_dir={:?}",
+        terminal_id,
+        watch_dir
+    );
+
     // Poll for up to 30 seconds for the directory to appear (Claude Code may not have run yet).
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
@@ -46,9 +52,18 @@ pub async fn watch_loop(
             .flatten()
             .map_or(false, |m| m.is_dir);
         if dir_exists {
+            log::debug!(
+                "claude_session_watcher [{:?}]: session dir found, starting fs watch",
+                terminal_id
+            );
             break;
         }
         if std::time::Instant::now() >= deadline {
+            log::debug!(
+                "claude_session_watcher [{:?}]: timed out waiting for session dir {:?}",
+                terminal_id,
+                watch_dir
+            );
             return;
         }
         cx.background_executor()
@@ -75,24 +90,48 @@ pub async fn watch_loop(
                 continue;
             };
 
+            log::debug!(
+                "claude_session_watcher [{:?}]: new .jsonl detected, session_id={}",
+                terminal_id,
+                session_id
+            );
+
             let Ok(Some(metadata)) = fs.metadata(&event.path).await else {
+                log::debug!(
+                    "claude_session_watcher [{:?}]: could not read metadata for {:?}, skipping",
+                    terminal_id,
+                    event.path
+                );
                 continue;
             };
             let file_time = metadata.mtime.timestamp_for_user();
             let file_dt = chrono::DateTime::<Utc>::from(file_time);
             if file_dt <= created_at {
+                log::debug!(
+                    "claude_session_watcher [{:?}]: skipping old file (file_time={} <= terminal_created_at={})",
+                    terminal_id,
+                    file_dt,
+                    created_at
+                );
                 continue;
             }
 
             let session_file = watch_dir.join(format!("{}.jsonl", session_id));
             let claimed = store
                 .update(cx, |store, cx| {
-                    store.try_claim_session(terminal_id, created_at, session_id, cx)
+                    store.try_claim_session(terminal_id, created_at, session_id.clone(), cx)
                 })
                 .unwrap_or(false);
 
+            log::debug!(
+                "claude_session_watcher [{:?}]: try_claim_session({}) -> claimed={}",
+                terminal_id,
+                session_id,
+                claimed
+            );
+
             if claimed {
-                poll_ai_title(session_file, fs, on_ai_title, cx).await;
+                poll_ai_title(terminal_id, session_file, fs, on_ai_title, cx).await;
                 return;
             }
         }
@@ -100,14 +139,25 @@ pub async fn watch_loop(
 }
 
 async fn poll_ai_title(
+    terminal_id: TerminalId,
     session_file: PathBuf,
     fs: Arc<dyn fs::Fs>,
     on_ai_title: Box<dyn FnOnce(SharedString, &mut AsyncApp) + Send + 'static>,
     cx: &mut AsyncApp,
 ) {
+    log::debug!(
+        "claude_session_watcher [{:?}]: polling for ai-title in {:?}",
+        terminal_id,
+        session_file
+    );
+
     let deadline = std::time::Instant::now() + Duration::from_secs(300);
     loop {
         if std::time::Instant::now() >= deadline {
+            log::debug!(
+                "claude_session_watcher [{:?}]: timed out waiting for ai-title",
+                terminal_id
+            );
             return;
         }
         if let Ok(content) = fs.load(&session_file).await {
@@ -118,6 +168,11 @@ async fn poll_ai_title(
                 if let Ok(value) = serde_json::from_str::<Value>(line) {
                     if value["type"].as_str() == Some("ai-title") {
                         if let Some(title) = value["aiTitle"].as_str() {
+                            log::debug!(
+                                "claude_session_watcher [{:?}]: found ai-title={:?}, applying",
+                                terminal_id,
+                                title
+                            );
                             on_ai_title(SharedString::from(title.to_owned()), cx);
                             return;
                         }
@@ -134,7 +189,7 @@ mod tests {
     use super::*;
     use crate::terminal_thread_metadata_store::TerminalThreadMetadata;
     use crate::thread_metadata_store::WorktreePaths;
-    use fs::FakeFs;
+    use fs::{FakeFs, Fs as _};
     use gpui::TestAppContext;
 
     fn make_metadata(terminal_id: TerminalId, working_dir: &str) -> TerminalThreadMetadata {
@@ -163,11 +218,11 @@ mod tests {
 
         cx.update(|cx| store.update(cx, |s, cx| s.save(meta, cx)));
 
-        let fake_fs = FakeFs::new(cx.background_executor().clone());
+        let fake_fs = FakeFs::new(cx.background_executor.clone());
         let watch_dir = PathBuf::from("/fake-home/.claude/projects/-home-user-myproject");
         fake_fs.create_dir(&watch_dir).await.unwrap();
 
-        let fs: Arc<dyn fs::Fs> = Arc::new(fake_fs.clone());
+        let fs: Arc<dyn fs::Fs> = fake_fs.clone();
         let store_weak = store.downgrade();
 
         let _watcher_task = cx.spawn(async move |mut cx| {
@@ -215,7 +270,7 @@ mod tests {
         let created_at = meta.created_at;
         cx.update(|cx| store.update(cx, |s, cx| s.save(meta, cx)));
 
-        let fake_fs = FakeFs::new(cx.background_executor().clone());
+        let fake_fs = FakeFs::new(cx.background_executor.clone());
         let watch_dir = PathBuf::from("/fake-home/.claude/projects/-home-user-project");
         fake_fs.create_dir(&watch_dir).await.unwrap();
 
@@ -228,7 +283,7 @@ mod tests {
             )
             .await;
 
-        let fs: Arc<dyn fs::Fs> = Arc::new(fake_fs.clone());
+        let fs: Arc<dyn fs::Fs> = fake_fs.clone();
         let store_weak = store.downgrade();
 
         let _watcher_task = cx.spawn(async move |mut cx| {
@@ -267,11 +322,11 @@ mod tests {
         let created_at = meta.created_at;
         cx.update(|cx| store.update(cx, |s, cx| s.save(meta, cx)));
 
-        let fake_fs = FakeFs::new(cx.background_executor().clone());
+        let fake_fs = FakeFs::new(cx.background_executor.clone());
         let watch_dir = PathBuf::from("/fake-home/.claude/projects/-home-user-aiproj");
         fake_fs.create_dir(&watch_dir).await.unwrap();
 
-        let fs: Arc<dyn fs::Fs> = Arc::new(fake_fs.clone());
+        let fs: Arc<dyn fs::Fs> = fake_fs.clone();
         let store_weak = store.downgrade();
 
         let received_title: std::sync::Arc<std::sync::Mutex<Option<SharedString>>> =

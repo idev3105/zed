@@ -1,0 +1,8 @@
+[tools]
+# Rust version is managed by rust-toolchain.toml (channel = "1.95.0")
+# with components: rustfmt, clippy, rust-analyzer, rust-src
+# and targets: wasm32-wasip2, wasm32-unknown-unknown, x86_64-unknown-linux-musl
+rust = "1.95.0"
+
+# Required by script/bootstrap for database migrations
+"cargo:sqlx-cli" = "0.7.2"

@@ -2125,6 +2125,40 @@ impl AgentPanel {
         );
     }
 
+    /// Resume a Claude session in an existing open terminal, or restore the terminal if closed.
+    /// If the terminal is already open, sends `claude --resume <session_id>` and focuses it.
+    /// If closed, restores it (which automatically runs `claude --resume` on spawn).
+    pub fn resume_claude_session(
+        &mut self,
+        metadata: TerminalThreadMetadata,
+        source: AgentThreadSource,
+        workspace: Option<&Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session_id) = metadata.claude_session_id.clone() else {
+            return;
+        };
+
+        if self.has_terminal(metadata.terminal_id) {
+            let terminal_id = metadata.terminal_id;
+            if let Some(terminal) = self.terminals.get(&terminal_id) {
+                let terminal_entity = terminal.view.read(cx).terminal().clone();
+                terminal_entity.update(cx, |terminal, _cx| {
+                    // Cancel any in-progress input, clear the screen, then resume.
+                    terminal.input(std::borrow::Cow::Borrowed(b"\x03" as &[u8]));
+                    terminal.clear();
+                    terminal.input(std::borrow::Cow::Owned(
+                        format!("claude --resume {session_id}\r").into_bytes(),
+                    ));
+                });
+            }
+            self.activate_terminal(terminal_id, true, window, cx);
+        } else {
+            self.restore_terminal(metadata, true, source, workspace, window, cx);
+        }
+    }
+
     fn restore_terminal_for_panel_load(
         &mut self,
         metadata: TerminalThreadMetadata,

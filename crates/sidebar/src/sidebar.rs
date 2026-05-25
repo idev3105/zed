@@ -3726,6 +3726,101 @@ impl Sidebar {
         .detach_and_log_err(cx);
     }
 
+    fn resume_claude_session_in_workspace(
+        workspace: &Entity<Workspace>,
+        metadata: &TerminalThreadMetadata,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let resume = |agent_panel: Entity<AgentPanel>,
+                      metadata: &TerminalThreadMetadata,
+                      workspace: Option<&Workspace>,
+                      window: &mut Window,
+                      cx: &mut App| {
+            agent_panel.update(cx, |panel, cx| {
+                panel.resume_claude_session(
+                    metadata.clone(),
+                    AgentThreadSource::Sidebar,
+                    workspace,
+                    window,
+                    cx,
+                );
+            });
+        };
+
+        let mut existing_panel = None;
+        workspace.update(cx, |workspace, cx| {
+            if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                existing_panel = Some(panel);
+            }
+        });
+
+        if let Some(agent_panel) = existing_panel {
+            resume(agent_panel, metadata, None, window, cx);
+            workspace.update(cx, |workspace, cx| {
+                workspace.focus_panel::<AgentPanel>(window, cx);
+            });
+            return;
+        }
+
+        let workspace = workspace.downgrade();
+        let metadata = metadata.clone();
+        let mut async_window_cx = window.to_async(cx);
+        cx.spawn(async move |_cx| {
+            let panel = AgentPanel::load(workspace.clone(), async_window_cx.clone()).await?;
+
+            workspace.update_in(&mut async_window_cx, |workspace, window, cx| {
+                let panel = workspace.panel::<AgentPanel>(cx).unwrap_or_else(|| {
+                    workspace.add_panel(panel.clone(), window, cx);
+                    panel.clone()
+                });
+                resume(panel, &metadata, Some(workspace), window, cx);
+                workspace.focus_panel::<AgentPanel>(window, cx);
+            })?;
+
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn resume_terminal_entry(
+        &mut self,
+        metadata: TerminalThreadMetadata,
+        workspace: ThreadEntryWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match workspace {
+            ThreadEntryWorkspace::Open(workspace) => {
+                let terminal_id = metadata.terminal_id;
+                self.record_terminal_access(terminal_id);
+                self.active_entry = Some(ActiveEntry::Terminal {
+                    terminal_id,
+                    workspace: workspace.clone(),
+                });
+                if let Some(multi_workspace) = self.multi_workspace.upgrade() {
+                    multi_workspace.update(cx, |multi_workspace, cx| {
+                        multi_workspace.activate(workspace.clone(), None, window, cx);
+                    });
+                }
+                Self::resume_claude_session_in_workspace(&workspace, &metadata, window, cx);
+                self.update_entries(cx);
+            }
+            ThreadEntryWorkspace::Closed {
+                folder_paths,
+                project_group_key,
+            } => {
+                self.open_workspace_and_activate_terminal(
+                    metadata,
+                    folder_paths,
+                    &project_group_key,
+                    window,
+                    cx,
+                );
+            }
+        }
+    }
+
     fn activate_terminal_in_workspace(
         &mut self,
         workspace: &Entity<Workspace>,
@@ -5591,6 +5686,7 @@ impl Sidebar {
             cx.flag_value::<AgentThreadWorktreeLabelFlag>(),
         );
         let is_remote = terminal.workspace.is_remote(cx);
+        let has_claude_session = terminal.metadata.claude_session_id.is_some();
 
         ThreadItem::new(id, terminal.metadata.title.clone())
             .base_bg(sidebar_bg)
@@ -5613,23 +5709,45 @@ impl Sidebar {
             }))
             .when(is_hovered, |this| {
                 this.action_slot(
-                    IconButton::new("close-terminal", IconName::Close)
-                        .icon_size(IconSize::Small)
-                        .icon_color(Color::Muted)
-                        .tooltip({
-                            let focus_handle = focus_handle.clone();
-                            move |_window, cx| {
-                                Tooltip::for_action_in(
-                                    "Close Terminal",
-                                    &ArchiveSelectedThread,
-                                    &focus_handle,
-                                    cx,
-                                )
-                            }
+                    h_flex()
+                        .gap_0p5()
+                        .when(has_claude_session, |this| {
+                            let metadata = metadata.clone();
+                            let workspace = workspace.clone();
+                            this.child(
+                                IconButton::new("resume-claude-session", IconName::PlayFilled)
+                                    .icon_size(IconSize::Small)
+                                    .icon_color(Color::Muted)
+                                    .tooltip(Tooltip::text("Resume Claude session"))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.resume_terminal_entry(
+                                            metadata.clone(),
+                                            workspace.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            )
                         })
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.close_terminal(&metadata, &workspace, window, cx);
-                        })),
+                        .child(
+                            IconButton::new("close-terminal", IconName::Close)
+                                .icon_size(IconSize::Small)
+                                .icon_color(Color::Muted)
+                                .tooltip({
+                                    let focus_handle = focus_handle.clone();
+                                    move |_window, cx| {
+                                        Tooltip::for_action_in(
+                                            "Close Terminal",
+                                            &ArchiveSelectedThread,
+                                            &focus_handle,
+                                            cx,
+                                        )
+                                    }
+                                })
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.close_terminal(&metadata, &workspace, window, cx);
+                                })),
+                        ),
                 )
             })
             .on_click(cx.listener({
