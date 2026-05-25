@@ -5730,7 +5730,6 @@ impl Sidebar {
             .blend(color.panel_background.opacity(0.25));
         let metadata = terminal.metadata.clone();
         let workspace = terminal.workspace.clone();
-        let focus_handle = self.focus_handle.clone();
         let worktrees = apply_worktree_label_mode(
             terminal.worktrees.clone(),
             cx.flag_value::<AgentThreadWorktreeLabelFlag>(),
@@ -5779,25 +5778,28 @@ impl Sidebar {
                                     })),
                             )
                         })
-                        .child(
+                        .child({
+                            let metadata = metadata.clone();
+                            let workspace = workspace.clone();
                             IconButton::new("close-terminal", IconName::Close)
                                 .icon_size(IconSize::Small)
                                 .icon_color(Color::Muted)
-                                .tooltip({
-                                    let focus_handle = focus_handle.clone();
-                                    move |_window, cx| {
-                                        Tooltip::for_action_in(
-                                            "Close Terminal",
-                                            &ArchiveSelectedThread,
-                                            &focus_handle,
-                                            cx,
-                                        )
-                                    }
-                                })
+                                .tooltip(Tooltip::text("Close Terminal"))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.hide_terminal_view(&metadata, &workspace, window, cx);
+                                }))
+                        })
+                        .child({
+                            let metadata = metadata.clone();
+                            let workspace = workspace.clone();
+                            IconButton::new("delete-terminal", IconName::Trash)
+                                .icon_size(IconSize::Small)
+                                .icon_color(Color::Muted)
+                                .tooltip(Tooltip::text("Delete Terminal Thread"))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.delete_terminal(&metadata, &workspace, window, cx);
-                                })),
-                        ),
+                                }))
+                        }),
                 )
             })
             .on_click(cx.listener({
