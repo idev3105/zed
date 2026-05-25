@@ -964,7 +964,7 @@ impl Sidebar {
                 AgentPanelEvent::TerminalClosed { metadata } => {
                     if let Some(workspace) = workspace.upgrade() {
                         let workspace = ThreadEntryWorkspace::Open(workspace);
-                        this.close_terminal(metadata, &workspace, window, cx);
+                        this.delete_terminal(metadata, &workspace, window, cx);
                     }
                 }
                 AgentPanelEvent::ThreadInteracted { thread_id } => {
@@ -4249,14 +4249,14 @@ impl Sidebar {
 
             this.update_in(cx, |this, window, cx| {
                 let workspace = ThreadEntryWorkspace::Open(workspace);
-                this.close_terminal(&metadata, &workspace, window, cx);
+                this.delete_terminal(&metadata, &workspace, window, cx);
             })?;
             anyhow::Ok(())
         })
         .detach_and_log_err(cx);
     }
 
-    fn close_terminal(
+    fn delete_terminal(
         &mut self,
         metadata: &TerminalThreadMetadata,
         workspace: &ThreadEntryWorkspace,
@@ -4447,6 +4447,55 @@ impl Sidebar {
                 window,
                 cx,
             );
+        }
+    }
+
+    fn hide_terminal_view(
+        &mut self,
+        metadata: &TerminalThreadMetadata,
+        workspace: &ThreadEntryWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ThreadEntryWorkspace::Open(workspace) = workspace else {
+            return;
+        };
+
+        let terminal_id = metadata.terminal_id;
+        let is_active = self
+            .active_entry
+            .as_ref()
+            .is_some_and(|entry| entry.is_active_terminal(terminal_id));
+        let neighbor = self
+            .contents
+            .entries
+            .iter()
+            .position(|entry| {
+                matches!(
+                    entry,
+                    ListEntry::Terminal(terminal)
+                        if terminal.metadata.terminal_id == terminal_id
+                )
+            })
+            .and_then(|position| self.neighboring_activatable_entry(position));
+
+        workspace.update(cx, |workspace, cx| {
+            if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                panel.update(cx, |panel, cx| {
+                    panel.hide_terminal(terminal_id, window, cx);
+                });
+            }
+        });
+
+        if is_active {
+            self.active_entry = None;
+            if neighbor
+                .as_ref()
+                .is_some_and(|neighbor| self.activate_entry(neighbor, window, cx))
+            {
+                return;
+            }
+            self.sync_active_entry_from_active_workspace(cx);
         }
     }
 
@@ -5083,7 +5132,7 @@ impl Sidebar {
             Some(ListEntry::Terminal(terminal)) => {
                 let metadata = terminal.metadata.clone();
                 let workspace = terminal.workspace.clone();
-                self.close_terminal(&metadata, &workspace, window, cx);
+                self.delete_terminal(&metadata, &workspace, window, cx);
             }
             _ => {}
         }
@@ -5745,7 +5794,7 @@ impl Sidebar {
                                     }
                                 })
                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.close_terminal(&metadata, &workspace, window, cx);
+                                    this.delete_terminal(&metadata, &workspace, window, cx);
                                 })),
                         ),
                 )
