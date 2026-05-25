@@ -1630,7 +1630,7 @@ async fn test_closing_last_agent_panel_terminal_restores_empty_header(cx: &mut T
             .expect("terminal should be visible in sidebar")
     });
     sidebar.update_in(cx, |sidebar, window, cx| {
-        sidebar.close_terminal(&terminal_metadata, &terminal_workspace, window, cx);
+        sidebar.delete_terminal(&terminal_metadata, &terminal_workspace, window, cx);
     });
     cx.run_until_parked();
 
@@ -3635,7 +3635,7 @@ async fn test_closing_active_agent_panel_terminal_activates_neighbor(cx: &mut Te
             .expect("server terminal should be visible in sidebar")
     });
     sidebar.update_in(cx, |sidebar, window, cx| {
-        sidebar.close_terminal(&server_metadata, &server_workspace, window, cx);
+        sidebar.delete_terminal(&server_metadata, &server_workspace, window, cx);
     });
     cx.run_until_parked();
 
