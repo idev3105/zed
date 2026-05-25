@@ -1965,6 +1965,30 @@ impl AgentPanel {
         self.close_terminal_internal(terminal_id, false, None, window, cx);
     }
 
+    pub fn hide_terminal(
+        &mut self,
+        terminal_id: TerminalId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let was_active = self.active_terminal_id() == Some(terminal_id);
+
+        if self.pending_terminal_spawn == Some(terminal_id) {
+            self.pending_terminal_spawn = None;
+        }
+        self.dismiss_terminal_notifications(terminal_id, cx);
+        if self.terminals.remove(&terminal_id).is_none() {
+            return;
+        }
+        if was_active {
+            self.base_view = BaseView::Uninitialized;
+            self.refresh_base_view_subscriptions(window, cx);
+            self.activate_draft(false, AgentThreadSource::AgentPanel, window, cx);
+        }
+        cx.emit(AgentPanelEvent::EntryChanged);
+        cx.notify();
+    }
+
     fn close_terminal_internal(
         &mut self,
         terminal_id: TerminalId,
