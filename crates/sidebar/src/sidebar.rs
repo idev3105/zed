@@ -4458,6 +4458,7 @@ impl Sidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // If the workspace is closed, the terminal process is already gone.
         let ThreadEntryWorkspace::Open(workspace) = workspace else {
             return;
         };
@@ -5736,6 +5737,7 @@ impl Sidebar {
         );
         let is_remote = terminal.workspace.is_remote(cx);
         let has_claude_session = terminal.metadata.claude_session_id.is_some();
+        let focus_handle = self.focus_handle.clone();
 
         ThreadItem::new(id, terminal.metadata.title.clone())
             .base_bg(sidebar_bg)
@@ -5795,7 +5797,17 @@ impl Sidebar {
                             IconButton::new("delete-terminal", IconName::Trash)
                                 .icon_size(IconSize::Small)
                                 .icon_color(Color::Muted)
-                                .tooltip(Tooltip::text("Delete Terminal Thread"))
+                                .tooltip({
+                                    let focus_handle = focus_handle.clone();
+                                    move |_window, cx| {
+                                        Tooltip::for_action_in(
+                                            "Delete Terminal Thread",
+                                            &ArchiveSelectedThread,
+                                            &focus_handle,
+                                            cx,
+                                        )
+                                    }
+                                })
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.delete_terminal(&metadata, &workspace, window, cx);
                                 }))
