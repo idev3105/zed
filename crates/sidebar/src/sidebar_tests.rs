@@ -1715,6 +1715,18 @@ async fn test_close_terminal_view_keeps_thread_in_sidebar(cx: &mut TestAppContex
         );
     });
 
+    // Sidebar should no longer have this terminal as the active entry
+    sidebar.read_with(cx, |sidebar, _cx| {
+        let still_active = sidebar
+            .active_entry
+            .as_ref()
+            .is_some_and(|entry| entry.is_active_terminal(terminal_id));
+        assert!(
+            !still_active,
+            "sidebar active_entry should not point to the hidden terminal"
+        );
+    });
+
     // Thread entry must REMAIN in the sidebar list
     assert_eq!(
         visible_entries_as_strings(&sidebar, cx),
