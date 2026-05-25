@@ -774,7 +774,7 @@ impl Sidebar {
             recent_projects_popover_handle: PopoverMenuHandle::default(),
             project_header_menu_handles: HashMap::new(),
             project_header_menu_ix: None,
-            terminal_context_menu_handles: HashMap::default(),
+            terminal_context_menu_handles: HashMap::new(),
             _subscriptions: Vec::new(),
             _draft_editor_observations: Vec::new(),
             import_banners_use_verbose_labels: None,
@@ -1842,6 +1842,17 @@ impl Sidebar {
         let scroll_position = self.list_state.logical_scroll_top();
 
         self.rebuild_contents(cx);
+
+        let live_terminal_indices: HashSet<usize> = self
+            .contents
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| matches!(e, ListEntry::Terminal(_)).then_some(i))
+            .collect();
+        self.terminal_context_menu_handles
+            .retain(|ix, _| live_terminal_indices.contains(ix));
+
         self.refresh_draft_editor_observations(cx);
 
         self.list_state.reset(self.contents.entries.len());
@@ -5742,6 +5753,7 @@ impl Sidebar {
         let has_claude_session = terminal.metadata.claude_session_id.is_some();
         let focus_handle = self.focus_handle.clone();
 
+        // Invariant: this key was inserted by render_entry before render_terminal is called.
         let context_menu_handle = self
             .terminal_context_menu_handles
             .get(&ix)
@@ -5769,7 +5781,7 @@ impl Sidebar {
                     terminal.metadata.terminal_id
                 ))
                 .with_handle(context_menu_handle)
-                .anchor(gpui::Anchor::TopLeft)
+                .anchor(gpui::Anchor::TopRight)
                 .menu(move |window, cx| {
                     let metadata = metadata_for_menu.clone();
                     let workspace = workspace_for_menu.clone();
